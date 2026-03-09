@@ -64,6 +64,7 @@ def train_bitnet(
     save_every: int = 500,
     streaming: bool = False,
     resume: bool = False,
+    data_dir: Optional[str] = None,
 ):
     """
     Train BitNet model on HuggingFace dataset.
@@ -102,8 +103,11 @@ def train_bitnet(
         tokenizer = AutoTokenizer.from_pretrained("gpt2")
 
     if streaming:
-        # Streaming: for huge datasets (e.g. codeparrot/github-code, 1TB)
-        ds = load_dataset(dataset_name, dataset_config, split="train", streaming=True)
+        # Streaming: for huge datasets (the-stack, etc.)
+        if data_dir:
+            ds = load_dataset(dataset_name, split="train", streaming=True, data_dir=data_dir)
+        else:
+            ds = load_dataset(dataset_name, dataset_config, split="train", streaming=True)
         text_key = next((k for k in ["text", "content", "code"] if k in ds.column_names), "code")
 
         def stream_batches():

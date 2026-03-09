@@ -23,11 +23,12 @@ from graviton_native.training.trainer import get_preset_config, train_bitnet
 
 
 # Code datasets — HuggingFace (streaming=True for huge datasets)
-# Note: codeparrot/github-code uses deprecated scripts; use hf-stack or the-stack
+# (dataset_name, config, text_key, streaming, data_dir?)
 CODE_DATASETS = {
-    "hf-stack": ("smangrul/hf-stack-v1", "default", "content", False),  # HuggingFace code
-    "the-stack": ("bigcode/the-stack", "data", "content", True),  # Large, streaming
-    "wikitext": ("wikitext", "wikitext-2-raw-v1", "text", False),
+    "hf-stack": ("smangrul/hf-stack-v1", "default", "content", False, None),
+    "the-stack": ("bigcode/the-stack", None, "content", True, "data/python"),  # 3TB, streaming
+    "the-stack-js": ("bigcode/the-stack", None, "content", True, "data/javascript"),
+    "wikitext": ("wikitext", "wikitext-2-raw-v1", "text", False, None),
 }
 
 
@@ -38,9 +39,9 @@ def main():
     parser.add_argument("--model_size", default="350m", choices=["350m", "1b", "2b"])
     parser.add_argument(
         "--dataset",
-        default="hf-stack",
+        default="the-stack",
         choices=list(CODE_DATASETS.keys()),
-        help="Code dataset (hf-stack=small, github-code=large)",
+        help="Code dataset (the-stack=3TB streaming, hf-stack=small)",
     )
     parser.add_argument("--data_path", type=str, default=None, help="Custom JSONL path")
     parser.add_argument("--output_dir", default="./checkpoints")
@@ -60,9 +61,17 @@ def main():
     else:
         ds_info = CODE_DATASETS[args.dataset]
         dataset_name = ds_info[0]
-        dataset_config = ds_info[1]
+        dataset_config = ds_info[1] or ""
         streaming = ds_info[3] if len(ds_info) > 3 else False
-        print(f"\n  Dataset: {dataset_name} ({dataset_config})" + (" [streaming]" if streaming else ""))
+        data_dir = ds_info[4] if len(ds_info) > 4 else None
+        info = f"{dataset_name}"
+        if data_dir:
+            info += f" ({data_dir})"
+        elif dataset_config:
+            info += f" ({dataset_config})"
+        if streaming:
+            info += " [streaming]"
+        print(f"\n  Dataset: {info}")
 
     print(f"  Model: BitNet {args.model_size}")
     print(f"  Steps: {args.steps}\n")
@@ -71,7 +80,7 @@ def main():
         model_size=args.model_size,
         data_path=args.data_path,
         dataset_name=dataset_name,
-        dataset_config=dataset_config,
+        dataset_config=dataset_config or "default",
         output_dir=args.output_dir,
         steps=args.steps,
         batch_size=args.batch_size,
@@ -80,6 +89,7 @@ def main():
         save_every=args.save_every,
         streaming=streaming,
         resume=args.resume,
+        data_dir=data_dir if not args.data_path else None,
     )
 
     print("\n  To run in Graviton:")
