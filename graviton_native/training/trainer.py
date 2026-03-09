@@ -63,6 +63,7 @@ def train_bitnet(
     lr: float = 3e-4,
     save_every: int = 500,
     streaming: bool = False,
+    resume: bool = False,
 ):
     """
     Train BitNet model on HuggingFace dataset.
@@ -160,9 +161,21 @@ def train_bitnet(
     output_path = Path(output_dir) / f"bitnet-{model_size}"
     output_path.mkdir(parents=True, exist_ok=True)
 
-    model.train()
+    # Resume from checkpoint if requested and exists
     step = 0
-    pbar = tqdm(total=steps, desc="Training")
+    ckpt_file = output_path / "pytorch_model.bin"
+    step_file = output_path / "training_step.txt"
+    if resume and ckpt_file.exists():
+        model.load_state_dict(torch.load(ckpt_file, map_location="cpu"), strict=True)
+        model = model.to(device)
+        if step_file.exists():
+            step = int(step_file.read_text().strip())
+            print(f"\n  Resumed from step {step}")
+        else:
+            step = 0  # checkpoint exists but no step file
+
+    model.train()
+    pbar = tqdm(total=steps, initial=step, desc="Training")
 
     while step < steps:
         for batch in loader:
@@ -191,6 +204,7 @@ def train_bitnet(
 
             if step > 0 and step % save_every == 0:
                 torch.save(model.state_dict(), output_path / "pytorch_model.bin")
+                (output_path / "training_step.txt").write_text(str(step))
                 import json
                 cfg_dict = {f: getattr(config, f) for f in config.__dataclass_fields__}
                 (output_path / "config.json").write_text(json.dumps(cfg_dict, indent=2))
@@ -199,6 +213,7 @@ def train_bitnet(
 
     pbar.close()
     torch.save(model.state_dict(), output_path / "pytorch_model.bin")
+    (output_path / "training_step.txt").write_text(str(step))
     import json
     cfg_dict = {f: getattr(config, f) for f in config.__dataclass_fields__}
     (output_path / "config.json").write_text(json.dumps(cfg_dict, indent=2))

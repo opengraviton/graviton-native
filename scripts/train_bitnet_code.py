@@ -49,6 +49,7 @@ def main():
     parser.add_argument("--seq_len", type=int, default=512)
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--save_every", type=int, default=250)
+    parser.add_argument("--resume", action="store_true", help="Resume from last checkpoint")
     args = parser.parse_args()
 
     if args.data_path:
@@ -78,6 +79,7 @@ def main():
         lr=args.lr,
         save_every=args.save_every,
         streaming=streaming,
+        resume=args.resume,
     )
 
     print("\n  To run in Graviton:")
