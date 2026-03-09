@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "graviton-native"
+version = "0.1.0"
+description = "Train efficient LLM architectures from scratch — BitNet, MoE, sparse. 32GB RAM for 500B+ params."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Graviton Community" }]
+keywords = ["llm", "bitnet", "ternary", "moe", "efficient", "training"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "torch>=2.0",
+    "transformers>=4.36",
+    "datasets>=2.14",
+    "accelerate>=0.24",
+    "graviton-ai",
+]
+
+[project.optional-dependencies]
+train = [
+    "wandb",
+    "deepspeed>=0.12",
+    "bitsandbytes>=0.41",
+]
+
+[project.scripts]
+graviton-train = "graviton_native.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["graviton_native*"]
