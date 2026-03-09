@@ -62,6 +62,7 @@ def train_bitnet(
     seq_len: int = 512,
     lr: float = 3e-4,
     save_every: int = 500,
+    streaming: bool = False,
 ):
     """
     Train BitNet model on HuggingFace dataset.
@@ -91,19 +92,7 @@ def train_bitnet(
     model = model.to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
 
-    # Load dataset
-    if data_path and Path(data_path).exists():
-        ds = load_dataset("json", data_files=data_path, split="train")
-        text_key = "text" if "text" in ds.column_names else (ds.column_names[0] if ds.column_names else "content")
-    else:
-        try:
-            ds = load_dataset(dataset_name, dataset_config, split="train")
-        except Exception:
-            ds = load_dataset(dataset_name, split="train")
-        # Code datasets: content, code, text
-        text_key = next((k for k in ["text", "content", "code"] if k in ds.column_names), ds.column_names[0])
-
-    # Tokenizer
+    # Tokenizer (load first, needed for both paths)
     try:
         from transformers import AutoTokenizer
         tokenizer = AutoTokenizer.from_pretrained("TinyLlama/TinyLlama-1.1B-Chat-v1.0")
@@ -111,19 +100,62 @@ def train_bitnet(
         from transformers import AutoTokenizer
         tokenizer = AutoTokenizer.from_pretrained("gpt2")
 
-    def tokenize(examples):
-        return tokenizer(
-            examples[text_key],
-            truncation=True,
-            max_length=seq_len,
-            padding="max_length",
-            return_tensors="pt",
-        )
+    if streaming:
+        # Streaming: for huge datasets (e.g. codeparrot/github-code, 1TB)
+        ds = load_dataset(dataset_name, dataset_config, split="train", streaming=True)
+        text_key = next((k for k in ["text", "content", "code"] if k in ds.column_names), "code")
 
-    ds = ds.map(tokenize, batched=True, remove_columns=ds.column_names)
-    ds.set_format(type="torch", columns=["input_ids", "attention_mask"])
+        def stream_batches():
+            batch_texts = []
+            for ex in ds:
+                t = ex.get(text_key) or ex.get("code") or ""
+                if t and len(t.strip()) > 10:
+                    batch_texts.append(t)
+                if len(batch_texts) >= batch_size:
+                    tok = tokenizer(
+                        batch_texts,
+                        truncation=True,
+                        max_length=seq_len,
+                        padding="max_length",
+                        return_tensors="pt",
+                    )
+                    yield {"input_ids": tok["input_ids"], "attention_mask": tok.get("attention_mask")}
+                    batch_texts = []
+            if batch_texts:
+                tok = tokenizer(
+                    batch_texts,
+                    truncation=True,
+                    max_length=seq_len,
+                    padding="max_length",
+                    return_tensors="pt",
+                )
+                yield {"input_ids": tok["input_ids"], "attention_mask": tok.get("attention_mask")}
 
-    loader = DataLoader(ds, batch_size=batch_size, shuffle=True, num_workers=0)
+        loader = stream_batches()
+    else:
+        # Non-streaming: load full dataset
+        if data_path and Path(data_path).exists():
+            ds = load_dataset("json", data_files=data_path, split="train")
+            text_key = "text" if "text" in ds.column_names else (ds.column_names[0] if ds.column_names else "content")
+        else:
+            try:
+                ds = load_dataset(dataset_name, dataset_config, split="train")
+            except Exception:
+                ds = load_dataset(dataset_name, split="train")
+            text_key = next((k for k in ["text", "content", "code"] if k in ds.column_names), ds.column_names[0])
+
+        def tokenize(examples):
+            return tokenizer(
+                examples[text_key],
+                truncation=True,
+                max_length=seq_len,
+                padding="max_length",
+                return_tensors="pt",
+            )
+
+        ds = ds.map(tokenize, batched=True, remove_columns=ds.column_names)
+        ds.set_format(type="torch", columns=["input_ids", "attention_mask"])
+        loader = DataLoader(ds, batch_size=batch_size, shuffle=True, num_workers=0)
 
     output_path = Path(output_dir) / f"bitnet-{model_size}"
     output_path.mkdir(parents=True, exist_ok=True)

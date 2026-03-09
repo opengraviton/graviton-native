@@ -22,12 +22,12 @@ from pathlib import Path
 from graviton_native.training.trainer import get_preset_config, train_bitnet
 
 
-# Code datasets — HuggingFace
+# Code datasets — HuggingFace (streaming=True for huge datasets)
+# Note: codeparrot/github-code uses deprecated scripts; use hf-stack or the-stack
 CODE_DATASETS = {
-    "hf-stack": ("smangrul/hf-stack-v1", "default", "content"),  # HuggingFace repos
-    "github-code": ("codeparrot/github-code", "clean", "code"),  # GitHub code (large)
-    "the-stack": ("bigcode/the-stack", "data", "content"),  # The Stack
-    "wikitext": ("wikitext", "wikitext-2-raw-v1", "text"),  # Fallback
+    "hf-stack": ("smangrul/hf-stack-v1", "default", "content", False),  # HuggingFace code
+    "the-stack": ("bigcode/the-stack", "data", "content", True),  # Large, streaming
+    "wikitext": ("wikitext", "wikitext-2-raw-v1", "text", False),
 }
 
 
@@ -54,12 +54,14 @@ def main():
     if args.data_path:
         dataset_name = "json"
         dataset_config = args.data_path
+        streaming = False
         print(f"\n  Code data: {args.data_path}")
     else:
         ds_info = CODE_DATASETS[args.dataset]
         dataset_name = ds_info[0]
         dataset_config = ds_info[1]
-        print(f"\n  Dataset: {dataset_name} ({dataset_config})")
+        streaming = ds_info[3] if len(ds_info) > 3 else False
+        print(f"\n  Dataset: {dataset_name} ({dataset_config})" + (" [streaming]" if streaming else ""))
 
     print(f"  Model: BitNet {args.model_size}")
     print(f"  Steps: {args.steps}\n")
@@ -75,6 +77,7 @@ def main():
         seq_len=args.seq_len,
         lr=args.lr,
         save_every=args.save_every,
+        streaming=streaming,
     )
 
     print("\n  To run in Graviton:")
