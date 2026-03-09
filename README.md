@@ -1,97 +1,97 @@
 # Graviton-Native
 
-**32 GB RAM'da 500B+ parametre. Mimari değişiklikle.**
+**500B+ parameters on 32 GB RAM. Through architectural change.**
 
-Graviton-Native, AI modellerini **baştan** verimli mimarilerle eğiten projedir. Post-training quantization yerine, model eğitiminin kendisi düşük bit ve sparse yapıda yapılır — böylece herkes kendi makinesinde büyük modeller çalıştırabilir.
+Graviton-Native trains AI models with efficient architectures **from scratch**. Instead of post-training quantization, the model training itself uses low-bit and sparse representations — so anyone can run large models on their own machine.
 
 **Technical Report:** [opengraviton.github.io/paper.html](https://opengraviton.github.io/paper.html) | [PAPER.md](PAPER.md)
 
-## Vizyon
+## Vision
 
-| Mevcut Durum | Graviton-Native Hedefi |
-|--------------|------------------------|
+| Current State | Graviton-Native Target |
+|---------------|------------------------|
 | 70B model → 140 GB+ RAM | 70B model → **14 GB** (1.58-bit) |
-| 500B model → imkansız | 500B MoE → **32 GB** (aktif parametre) |
-| Quantization = kalite kaybı | Native training = minimal kayıp |
+| 500B model → impossible | 500B MoE → **32 GB** (active params) |
+| Quantization = quality loss | Native training = minimal loss |
 
-## Mimari Yaklaşımlar
+## Architectural Approaches
 
 ### 1. BitNet b1.58 — Ternary Weights
-- Ağırlıklar **{-1, 0, +1}** ile eğitilir
-- Matris çarpımı = sadece toplama/çıkarma (float multiply yok)
-- ~10x bellek tasarrufu, ~10x enerji tasarrufu
-- Referans: [BitNet b1.58](https://arxiv.org/abs/2402.17764)
+- Weights trained with **{-1, 0, +1}**
+- Matrix multiply = add/subtract only (no float multiply)
+- ~10x memory savings, ~10x energy savings
+- Reference: [BitNet b1.58](https://arxiv.org/abs/2402.17764)
 
 ### 2. MoE (Mixture of Experts)
-- 500B toplam parametre, ~10–20B aktif per token
-- Top-K routing: her token için k expert seçilir
-- Graviton'da inference desteği
+- 500B total params, ~10–20B active per token
+- Top-K routing: k experts selected per token
+- Inference support in Graviton
 
 ### 3. Sparse / Top-K Activation
-- Her katmanda sadece %30 nöron ateşlenir
-- %70 hesaplama tasarrufu
+- Only 30% of neurons fire per layer
+- 70% compute savings
 
-## Proje Yapısı
+## Project Structure
 
 ```
 graviton-native/
 ├── graviton_native/
-│   ├── models/          # BitNet, MoE mimarileri
-│   ├── training/        # Eğitim pipeline
-│   └── quantization/    # Eğitim sırasında quantization
-├── scripts/             # Eğitim scriptleri
-├── configs/             # Model konfigürasyonları
+│   ├── models/          # BitNet, MoE architectures
+│   ├── training/        # Training pipeline
+│   └── quantization/    # Quantization during training
+├── scripts/             # Training scripts
+├── configs/             # Model configurations
 └── README.md
 ```
 
-## Kurulum
+## Installation
 
 ```bash
 cd graviton-native
 pip install -e ".[train]"
 ```
 
-## Hızlı Başlangıç
+## Quick Start
 
-### Hızlı demo (2 adım)
+### Quick demo (2 steps)
 
 ```bash
 python scripts/train_bitnet.py --model_size 350m --steps 2
 ```
 
-### Gerçek veriyle eğitim (WikiText, C4, vb.)
+### Training with real data (WikiText, C4, etc.)
 
 ```bash
-# WikiText-2 ile 500 adım
+# 500 steps with WikiText-2
 python scripts/train_bitnet_full.py --model_size 350m --steps 500
 
-# Özel JSONL veri
+# Custom JSONL data
 python scripts/train_bitnet_full.py --data_path ./data/train.jsonl --model_size 350m
 ```
 
-### Graviton ile inference
+### Inference with Graviton
 
-Graviton-Native checkpoint'leri Graviton'da doğrudan çalışır:
+Graviton-Native checkpoints run directly in Graviton:
 
 ```bash
 graviton-ui
 # BitNet: graviton-native/checkpoints/bitnet-350m
 # MoE:    graviton-native/checkpoints/moe-small
-# Otomatik algılanır
+# Auto-detected
 ```
 
-### MoE eğitimi
+### MoE training
 
 ```bash
 python scripts/train_moe.py --model_size small --steps 100
 ```
 
-## Gereksinimler
+## Requirements
 
 - Python 3.9+
 - PyTorch 2.0+
-- Apple Silicon / NVIDIA GPU (opsiyonel; CPU'da da çalışır)
+- Apple Silicon / NVIDIA GPU (optional; runs on CPU too)
 
-## Lisans
+## License
 
-Apache-2.0 — Graviton ile uyumlu.
+Apache-2.0 — Compatible with Graviton.

@@ -94,10 +94,14 @@ def train_bitnet(
     # Load dataset
     if data_path and Path(data_path).exists():
         ds = load_dataset("json", data_files=data_path, split="train")
-        text_key = "text" if "text" in ds.column_names else ds.column_names[0]
+        text_key = "text" if "text" in ds.column_names else (ds.column_names[0] if ds.column_names else "content")
     else:
-        ds = load_dataset(dataset_name, dataset_config, split="train")
-        text_key = "text" if "text" in ds.column_names else "content"
+        try:
+            ds = load_dataset(dataset_name, dataset_config, split="train")
+        except Exception:
+            ds = load_dataset(dataset_name, split="train")
+        # Code datasets: content, code, text
+        text_key = next((k for k in ["text", "content", "code"] if k in ds.column_names), ds.column_names[0])
 
     # Tokenizer
     try:
