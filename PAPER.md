@@ -100,6 +100,6 @@ Graviton-Native demonstrates that architectural innovation—native ternary weig
 
 ---
 
-**Code:** [github.com/opengraviton/graviton](https://github.com/opengraviton/graviton) (graviton-native/ in repo)  
+**Code:** [github.com/opengraviton/graviton-native](https://github.com/opengraviton/graviton-native)  
 **Inference:** [github.com/opengraviton/graviton](https://github.com/opengraviton/graviton)  
 **Web:** [opengraviton.github.io/paper.html](https://opengraviton.github.io/paper.html)
