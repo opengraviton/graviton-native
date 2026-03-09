@@ -24,10 +24,11 @@ from graviton_native.training.trainer import get_preset_config, train_bitnet
 
 # Code datasets — HuggingFace (streaming=True for huge datasets)
 # (dataset_name, config, text_key, streaming, data_dir?)
+# Note: the-stack requires HuggingFace login + accept terms at huggingface.co/datasets/bigcode/the-stack
 CODE_DATASETS = {
-    "hf-stack": ("smangrul/hf-stack-v1", "default", "content", False, None),
-    "the-stack": ("bigcode/the-stack", None, "content", True, "data/python"),  # 3TB, streaming
+    "the-stack": ("bigcode/the-stack", None, "content", True, "data/python"),  # 3TB, gated
     "the-stack-js": ("bigcode/the-stack", None, "content", True, "data/javascript"),
+    "hug-stack": ("smangrul/hug_stack", None, "content", False, None),  # 6.5K samples, open
     "wikitext": ("wikitext", "wikitext-2-raw-v1", "text", False, None),
 }
 
@@ -41,7 +42,7 @@ def main():
         "--dataset",
         default="the-stack",
         choices=list(CODE_DATASETS.keys()),
-        help="Code dataset (the-stack=3TB streaming, hf-stack=small)",
+        help="Code dataset (the-stack=3TB gated, hug-stack=open)",
     )
     parser.add_argument("--data_path", type=str, default=None, help="Custom JSONL path")
     parser.add_argument("--output_dir", default="./checkpoints")
@@ -80,7 +81,7 @@ def main():
         model_size=args.model_size,
         data_path=args.data_path,
         dataset_name=dataset_name,
-        dataset_config=dataset_config or "default",
+        dataset_config=dataset_config,
         output_dir=args.output_dir,
         steps=args.steps,
         batch_size=args.batch_size,

@@ -144,7 +144,10 @@ def train_bitnet(
             text_key = "text" if "text" in ds.column_names else (ds.column_names[0] if ds.column_names else "content")
         else:
             try:
-                ds = load_dataset(dataset_name, dataset_config, split="train")
+                if dataset_config:
+                    ds = load_dataset(dataset_name, dataset_config, split="train")
+                else:
+                    ds = load_dataset(dataset_name, split="train")
             except Exception:
                 ds = load_dataset(dataset_name, split="train")
             text_key = next((k for k in ["text", "content", "code"] if k in ds.column_names), ds.column_names[0])
