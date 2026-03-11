@@ -7,6 +7,7 @@ Trains BitNet models on real data with HuggingFace datasets.
 from __future__ import annotations
 
 import math
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -47,6 +48,27 @@ def get_preset_config(size: str) -> BitNetConfig:
             vocab_size=128256,
             max_position_embeddings=4096,
         ),
+        "7b": BitNetConfig(
+            hidden_size=4096,
+            intermediate_size=11008,
+            num_hidden_layers=32,
+            num_attention_heads=32,
+            num_key_value_heads=4,
+            vocab_size=32000,
+            max_position_embeddings=4096,
+        ),
+        # 72B — CodeLlama 70B architecture, BitNet ternary for inference speed
+        # Requires: 8x A100 80GB + DeepSpeed ZeRO-3 + CPU offload
+        "72b": BitNetConfig(
+            hidden_size=8192,
+            intermediate_size=28672,
+            num_hidden_layers=80,
+            num_attention_heads=64,
+            num_key_value_heads=8,
+            vocab_size=32016,
+            max_position_embeddings=16384,
+            rope_theta=1000000.0,
+        ),
     }
     return presets.get(size, presets["350m"])
 
@@ -65,6 +87,8 @@ def train_bitnet(
     streaming: bool = False,
     resume: bool = False,
     data_dir: Optional[str] = None,
+    gradient_checkpointing: bool = True,
+    use_8bit_optimizer: bool = False,
 ):
     """
     Train BitNet model on HuggingFace dataset.
@@ -88,11 +112,32 @@ def train_bitnet(
 
     n_params = sum(p.numel() for p in model.parameters())
     print(f"\n  BitNet {model_size}: {n_params / 1e6:.1f}M parameters")
-    print(f"  Ternary: ~{n_params * 1.58 / 8 / 1e6:.1f} MB\n")
+    print(f"  Ternary: ~{n_params * 1.58 / 8 / 1e6:.1f} MB")
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # Memory-efficient training (Graviton style)
+    model.gradient_checkpointing = gradient_checkpointing
+    if gradient_checkpointing:
+        print(f"  Gradient checkpointing: ON (~60% less activation memory)")
+    if use_8bit_optimizer:
+        print(f"  8-bit optimizer: ON")
+    print()
+
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+    elif getattr(torch.backends.mps, "is_available", lambda: False)() and getattr(torch.backends.mps, "is_built", lambda: False)():
+        device = torch.device("mps")  # Apple Silicon
+    else:
+        device = torch.device("cpu")
     model = model.to(device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
+    if use_8bit_optimizer:
+        try:
+            import bitsandbytes
+            optimizer = bitsandbytes.optim.AdamW8bit(model.parameters(), lr=lr)
+        except ImportError:
+            optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
+            print("  (bitsandbytes not found, using standard AdamW)")
+    else:
+        optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
 
     # Tokenizer (load first, needed for both paths)
     try:
@@ -102,12 +147,26 @@ def train_bitnet(
         from transformers import AutoTokenizer
         tokenizer = AutoTokenizer.from_pretrained("gpt2")
 
+    # Token for gated datasets (e.g. the-stack)
+    hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+    if hf_token and "the-stack" in str(dataset_name):
+        try:
+            from huggingface_hub import login
+            login(token=hf_token)
+        except Exception:
+            pass
+
     if streaming:
         # Streaming: for huge datasets (the-stack, etc.)
+        load_kw = {"split": "train", "streaming": True}
+        if hf_token:
+            load_kw["token"] = hf_token
         if data_dir:
-            ds = load_dataset(dataset_name, split="train", streaming=True, data_dir=data_dir)
+            ds = load_dataset(dataset_name, data_dir=data_dir, **load_kw)
+        elif dataset_config:
+            ds = load_dataset(dataset_name, dataset_config, **load_kw)
         else:
-            ds = load_dataset(dataset_name, dataset_config, split="train", streaming=True)
+            ds = load_dataset(dataset_name, **load_kw)
         text_key = next((k for k in ["text", "content", "code"] if k in ds.column_names), "code")
 
         def stream_batches():

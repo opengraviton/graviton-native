@@ -37,7 +37,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="Graviton-Native: Code model training from scratch (BitNet)"
     )
-    parser.add_argument("--model_size", default="350m", choices=["350m", "1b", "2b"])
+    parser.add_argument("--model_size", default="350m", choices=["350m", "1b", "2b", "7b"])
     parser.add_argument(
         "--dataset",
         default="the-stack",
@@ -52,6 +52,8 @@ def main():
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--save_every", type=int, default=250)
     parser.add_argument("--resume", action="store_true", help="Resume from last checkpoint")
+    parser.add_argument("--no_gradient_checkpointing", action="store_true", help="Disable gradient checkpointing (uses more memory)")
+    parser.add_argument("--use_8bit_optimizer", action="store_true", help="Use 8-bit Adam (less memory)")
     args = parser.parse_args()
 
     if args.data_path:
@@ -91,6 +93,8 @@ def main():
         streaming=streaming,
         resume=args.resume,
         data_dir=data_dir if not args.data_path else None,
+        gradient_checkpointing=not args.no_gradient_checkpointing,
+        use_8bit_optimizer=args.use_8bit_optimizer,
     )
 
     print("\n  To run in Graviton:")

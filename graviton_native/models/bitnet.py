@@ -196,12 +196,18 @@ class BitNetBlock(nn.Module):
         return torch.cat([-x2, x1], dim=-1)
 
 
+def _checkpointed_forward(layer: BitNetBlock, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+    """Wrapper for gradient checkpointing."""
+    return layer(x, position_embeddings=(cos, sin))
+
+
 class BitNetCausalLM(nn.Module):
     """Full BitNet causal LM — embedding + blocks + lm_head."""
 
     def __init__(self, config: BitNetConfig):
         super().__init__()
         self.config = config
+        self.gradient_checkpointing = False
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
         self.layers = nn.ModuleList([
             BitNetBlock(config, i) for i in range(config.num_hidden_layers)
@@ -224,7 +230,12 @@ class BitNetCausalLM(nn.Module):
         cos, sin = self._get_rope(position_ids)
 
         for layer in self.layers:
-            x = layer(x, position_embeddings=(cos, sin))
+            if self.training and self.gradient_checkpointing:
+                x = torch.utils.checkpoint.checkpoint(
+                    _checkpointed_forward, layer, x, cos, sin, use_reentrant=False
+                )
+            else:
+                x = layer(x, position_embeddings=(cos, sin))
 
         x = self.norm(x)
         logits = self.lm_head(x)

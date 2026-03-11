@@ -92,6 +92,37 @@ python scripts/train_moe.py --model_size small --steps 100
 - PyTorch 2.0+
 - Apple Silicon / NVIDIA GPU (optional; runs on CPU too)
 
+## graviton-train — Single Command (Mac + NVIDIA)
+
+**Memory-efficient:** Gradient checkpointing + 8-bit optimizer (for 7b). Training with low RAM.
+
+**Mac (MPS, 32 GPU core):**
+```bash
+# 1B or 2B — easy on 64 GB Mac
+graviton-train run --num_gpu_cores 32 --model_size 1b --dataset the-stack --steps 5000 --batch_size 2 --save_every 500 --resume
+
+# 7B — gradient checkpoint + 8-bit optimizer (try on 64 GB Mac)
+graviton-train run --num_gpu_cores 32 --model_size 7b --dataset the-stack --steps 5000 --batch_size 1 --save_every 500
+```
+
+**NVIDIA (DeepSpeed, 8 GPU):**
+```bash
+graviton-train run --num_gpus 8 --model_size 72b --dataset the-stack --steps 100000 --batch_size 1 --grad_accum 64
+```
+
+## 72B Code Model (Production)
+
+72B requires 8x A100 80GB — run on cloud (RunPod, Vast.ai, Lambda):
+
+```bash
+# On cloud instance (8x A100)
+cd graviton-native
+export HF_TOKEN=hf_xxx
+bash scripts/run_72b_cloud.sh
+```
+
+See **[CLOUD_72B.md](CLOUD_72B.md)** for full setup (RunPod, Vast.ai, Lambda).
+
 ## License
 
 Apache-2.0 — Compatible with Graviton.
