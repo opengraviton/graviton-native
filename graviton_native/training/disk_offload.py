@@ -128,6 +128,40 @@ def train_72b_disk_offload(
             gc.collect()
             break
 
+    # Verify layer files are loadable (corrupted if interrupted during save)
+    def _verify_layers():
+        try:
+            torch.load(layers_dir / "layer_000.pt", map_location="cpu")
+            return True
+        except Exception:
+            return False
+
+    if resume and not _verify_layers():
+        latest = _latest_ckpt()
+        if latest:
+            print(f"  Corrupted layers detected. Restoring from {latest.name}...")
+            for f in ["embed.pt", "norm.pt", "lm_head.pt", "inv_freq.pt"]:
+                src = latest / f
+                if src.exists():
+                    (offload_dir / f).write_bytes(src.read_bytes())
+            for p in (latest / "layers").glob("layer_*.pt"):
+                (layers_dir / p.name).write_bytes(p.read_bytes())
+            start_step = int(latest.name.split("step")[1])
+            step_file.write_text(str(start_step))
+            print(f"  Restored to step {start_step}")
+        else:
+            print("  WARNING: Corrupted layers and no checkpoint. Re-initializing from scratch.")
+            for p in layers_dir.glob("layer_*.pt"):
+                p.unlink()
+            start_step = 0
+            step_file.write_text("0")
+            # Re-run init (layers_dir is now empty)
+            for i in range(config.num_hidden_layers):
+                layer = BitNetBlock(config, i)
+                torch.save(layer.state_dict(), layers_dir / f"layer_{i:03d}.pt")
+                del layer
+                gc.collect()
+
     # Load data
     from datasets import load_dataset
     try:

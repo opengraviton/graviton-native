@@ -103,6 +103,10 @@ graviton-train run --num_gpu_cores 32 --model_size 1b --dataset the-stack --step
 
 # 7B — gradient checkpoint + 8-bit optimizer (try on 64 GB Mac)
 graviton-train run --num_gpu_cores 32 --model_size 7b --dataset the-stack --steps 5000 --batch_size 1 --save_every 500
+
+# 72B on Mac — disk-offload (~15 GB RAM, ~500 GB disk)
+cd graviton-native
+python3 -m graviton_native.cli run --num_gpu_cores 32 --model_size 72b --disk_offload --steps 5000 --save_every 100
 ```
 
 **NVIDIA (DeepSpeed, 8 GPU):**
@@ -110,9 +114,11 @@ graviton-train run --num_gpu_cores 32 --model_size 7b --dataset the-stack --step
 graviton-train run --num_gpus 8 --model_size 72b --dataset the-stack --steps 100000 --batch_size 1 --grad_accum 64
 ```
 
-## 72B Code Model (Production)
+## 72B Code Model
 
-72B requires 8x A100 80GB — run on cloud (RunPod, Vast.ai, Lambda):
+**Option A — Mac (disk-offload):** Train 72B on 64 GB Mac with `--disk_offload`. ~15 GB RAM, ~500 GB disk. See command above.
+
+**Option B — Cloud (8x A100 80GB):** RunPod, Vast.ai, Lambda. See **[CLOUD_72B.md](CLOUD_72B.md)** for full setup.
 
 ```bash
 # On cloud instance (8x A100)
@@ -120,8 +126,6 @@ cd graviton-native
 export HF_TOKEN=hf_xxx
 bash scripts/run_72b_cloud.sh
 ```
-
-See **[CLOUD_72B.md](CLOUD_72B.md)** for full setup (RunPod, Vast.ai, Lambda).
 
 ## License
 
