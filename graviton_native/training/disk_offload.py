@@ -128,7 +128,17 @@ def train_72b_disk_offload(
             gc.collect()
             break
 
-    # Verify layer files are loadable (corrupted if interrupted during save)
+    def _restore_from_ckpt(latest):
+        """Restore offload_dir from checkpoint."""
+        for f in ["embed.pt", "norm.pt", "lm_head.pt", "inv_freq.pt"]:
+            src = latest / f
+            if src.exists():
+                (offload_dir / f).write_bytes(src.read_bytes())
+        for p in (latest / "layers").glob("layer_*.pt"):
+            (layers_dir / p.name).write_bytes(p.read_bytes())
+        return int(latest.name.split("step")[1])
+
+    # Verify layer 0 (quick sanity check)
     def _verify_layers():
         try:
             torch.load(layers_dir / "layer_000.pt", map_location="cpu")
@@ -140,13 +150,7 @@ def train_72b_disk_offload(
         latest = _latest_ckpt()
         if latest:
             print(f"  Corrupted layers detected. Restoring from {latest.name}...")
-            for f in ["embed.pt", "norm.pt", "lm_head.pt", "inv_freq.pt"]:
-                src = latest / f
-                if src.exists():
-                    (offload_dir / f).write_bytes(src.read_bytes())
-            for p in (latest / "layers").glob("layer_*.pt"):
-                (layers_dir / p.name).write_bytes(p.read_bytes())
-            start_step = int(latest.name.split("step")[1])
+            start_step = _restore_from_ckpt(latest)
             step_file.write_text(str(start_step))
             print(f"  Restored to step {start_step}")
         else:
@@ -155,7 +159,6 @@ def train_72b_disk_offload(
                 p.unlink()
             start_step = 0
             step_file.write_text("0")
-            # Re-run init (layers_dir is now empty)
             for i in range(config.num_hidden_layers):
                 layer = BitNetBlock(config, i)
                 torch.save(layer.state_dict(), layers_dir / f"layer_{i:03d}.pt")
@@ -286,40 +289,67 @@ def train_72b_disk_offload(
         print(f"  Already at step {start_step}. Nothing to do.")
         return str(offload_dir)
 
-    for i, step in enumerate(tqdm(range(start_step, steps), desc="72B disk-offload", initial=start_step, total=steps)):
-        ids = get_batch()
-        torch.save(ids[:, 1:].reshape(-1).cpu(), acts_dir / "targets.pt")
-        torch.save(ids.cpu(), acts_dir / "input_ids.pt")
+    step = start_step
+    pbar = tqdm(initial=step, total=steps, desc="72B disk-offload")
+    while step < steps:
+        try:
+            ids = get_batch()
+            torch.save(ids[:, 1:].reshape(-1).cpu(), acts_dir / "targets.pt")
+            torch.save(ids.cpu(), acts_dir / "input_ids.pt")
 
-        logits = forward(ids)
-        loss = torch.nn.functional.cross_entropy(
-            logits[:, :-1].reshape(-1, config.vocab_size),
-            ids[:, 1:].reshape(-1),
-            ignore_index=0,
-        )
-        loss_val = loss.item()
-        del logits
-        gc.collect()
+            logits = forward(ids)
+            loss = torch.nn.functional.cross_entropy(
+                logits[:, :-1].reshape(-1, config.vocab_size),
+                ids[:, 1:].reshape(-1),
+                ignore_index=0,
+            )
+            loss_val = loss.item()
+            del logits
+            gc.collect()
 
-        backward_and_optimizer(lr)
-        del loss
-        gc.collect()
+            backward_and_optimizer(lr)
+            del loss
+            gc.collect()
 
-        current_step = step + 1
-        step_file.write_text(str(current_step))
+            step += 1
+            step_file.write_text(str(step))
+            pbar.update(1)
 
-        if current_step % 1 == 0:
-            tqdm.write(f"  step {current_step}/{steps} loss={loss_val:.4f}")
-        if current_step % save_every == 0:
-            ckpt = out_path / f"bitnet-72b-step{current_step}"
-            ckpt.mkdir(parents=True, exist_ok=True)
-            for f in ["embed.pt", "norm.pt", "lm_head.pt", "inv_freq.pt", "config.json"]:
-                if (offload_dir / f).exists():
-                    (ckpt / f).write_bytes((offload_dir / f).read_bytes())
-            (ckpt / "layers").mkdir(exist_ok=True)
-            for p in layers_dir.glob("layer_*.pt"):
-                (ckpt / "layers" / p.name).write_bytes(p.read_bytes())
-            tqdm.write(f"  Saved {ckpt}")
+            if step % 1 == 0:
+                pbar.write(f"  step {step}/{steps} loss={loss_val:.4f}")
+            if step % save_every == 0:
+                ckpt = out_path / f"bitnet-72b-step{step}"
+                ckpt.mkdir(parents=True, exist_ok=True)
+                for f in ["embed.pt", "norm.pt", "lm_head.pt", "inv_freq.pt", "config.json"]:
+                    if (offload_dir / f).exists():
+                        (ckpt / f).write_bytes((offload_dir / f).read_bytes())
+                (ckpt / "layers").mkdir(exist_ok=True)
+                for p in layers_dir.glob("layer_*.pt"):
+                    (ckpt / "layers" / p.name).write_bytes(p.read_bytes())
+                pbar.write(f"  Saved {ckpt}")
+        except RuntimeError as e:
+            if "PytorchStreamReader" in str(e) or "file not found" in str(e):
+                latest = _latest_ckpt()
+                if latest:
+                    pbar.write(f"  Corrupted layer. Restoring from {latest.name}...")
+                    step = _restore_from_ckpt(latest)
+                    step_file.write_text(str(step))
+                    pbar.n = step
+                    pbar.write(f"  Restored to step {step}. Retrying.")
+                else:
+                    pbar.write("  No checkpoint to restore. Re-initializing layers...")
+                    for p in layers_dir.glob("layer_*.pt"):
+                        p.unlink()
+                    for i in range(config.num_hidden_layers):
+                        layer = BitNetBlock(config, i)
+                        torch.save(layer.state_dict(), layers_dir / f"layer_{i:03d}.pt")
+                        del layer
+                        gc.collect()
+                    step = 0
+                    step_file.write_text("0")
+                    pbar.write("  Re-initialized. Retrying from step 0.")
+            else:
+                raise
 
     print(f"\n  Done. Checkpoints in {output_dir}")
     return str(offload_dir)
