@@ -43,16 +43,34 @@ def train_72b_disk_offload(
     # Resume: load step count or restore from latest checkpoint
     start_step = 0
     step_file = offload_dir / "step.txt"
+    step_file_tmp = offload_dir / "step.txt.tmp"
     layers_dir = offload_dir / "layers"
 
-    def _latest_ckpt():
-        ckpts = sorted(out_path.glob("bitnet-72b-step*"), key=lambda p: int(p.name.split("step")[1]) if "step" in p.name else 0)
-        return ckpts[-1] if ckpts else None
+    def _write_step(s: int):
+        """Atomic write of step number."""
+        step_file_tmp.write_text(str(s))
+        step_file_tmp.replace(step_file)
+
+    def _latest_ckpt(max_step: Optional[int] = None):
+        ckpts = sorted(
+            out_path.glob("bitnet-72b-step*"),
+            key=lambda p: int(p.name.split("step")[1]) if "step" in p.name else 0,
+        )
+        if not ckpts:
+            return None
+        if max_step is not None:
+            valid = [p for p in ckpts if int(p.name.split("step")[1] if "step" in p.name else 0) <= max_step]
+            return valid[-1] if valid else None
+        return ckpts[-1]
 
     if resume:
         if step_file.exists():
-            start_step = int(step_file.read_text().strip())
-            print(f"  Resuming from step {start_step}")
+            try:
+                start_step = int(step_file.read_text().strip())
+                print(f"  Resuming from step {start_step}")
+            except (ValueError, OSError):
+                start_step = 0
+                print("  step.txt invalid, will infer from checkpoint")
         elif not (layers_dir / "layer_000.pt").exists():
             latest = _latest_ckpt()
             if latest:
@@ -65,7 +83,7 @@ def train_72b_disk_offload(
                 layers_dir.mkdir(exist_ok=True)
                 for p in (latest / "layers").glob("layer_*.pt"):
                     (layers_dir / p.name).write_bytes(p.read_bytes())
-                step_file.write_text(str(start_step))
+                _write_step(start_step)
         else:
             # layers exist but no step.txt — infer from latest checkpoint
             latest = _latest_ckpt()
@@ -147,18 +165,25 @@ def train_72b_disk_offload(
             return False
 
     if resume and not _verify_layers():
-        latest = _latest_ckpt()
+        # Prefer checkpoint <= step.txt to avoid jumping backward
+        step_from_file = None
+        if step_file.exists():
+            try:
+                step_from_file = int(step_file.read_text().strip())
+            except (ValueError, OSError):
+                pass
+        latest = _latest_ckpt(max_step=step_from_file) if step_from_file is not None else _latest_ckpt()
         if latest:
             print(f"  Corrupted layers detected. Restoring from {latest.name}...")
             start_step = _restore_from_ckpt(latest)
-            step_file.write_text(str(start_step))
+            _write_step(start_step)
             print(f"  Restored to step {start_step}")
         else:
             print("  WARNING: Corrupted layers and no checkpoint. Re-initializing from scratch.")
             for p in layers_dir.glob("layer_*.pt"):
                 p.unlink()
             start_step = 0
-            step_file.write_text("0")
+            _write_step(0)
             for i in range(config.num_hidden_layers):
                 layer = BitNetBlock(config, i)
                 torch.save(layer.state_dict(), layers_dir / f"layer_{i:03d}.pt")
@@ -293,6 +318,9 @@ def train_72b_disk_offload(
     pbar = tqdm(initial=step, total=steps, desc="72B disk-offload")
     while step < steps:
         try:
+            # Persist step BEFORE heavy work so resume survives Ctrl+C mid-step
+            _write_step(step)
+
             ids = get_batch()
             torch.save(ids[:, 1:].reshape(-1).cpu(), acts_dir / "targets.pt")
             torch.save(ids.cpu(), acts_dir / "input_ids.pt")
@@ -312,7 +340,7 @@ def train_72b_disk_offload(
             gc.collect()
 
             step += 1
-            step_file.write_text(str(step))
+            _write_step(step)
             pbar.update(1)
 
             if step % 1 == 0:
@@ -327,13 +355,29 @@ def train_72b_disk_offload(
                 for p in layers_dir.glob("layer_*.pt"):
                     (ckpt / "layers" / p.name).write_bytes(p.read_bytes())
                 pbar.write(f"  Saved {ckpt}")
+            # Light checkpoint every 10 steps for disk offload (more restore points)
+            elif step % 10 == 0:
+                ckpt = out_path / f"bitnet-72b-step{step}"
+                ckpt.mkdir(parents=True, exist_ok=True)
+                for f in ["embed.pt", "norm.pt", "lm_head.pt", "inv_freq.pt", "config.json"]:
+                    if (offload_dir / f).exists():
+                        (ckpt / f).write_bytes((offload_dir / f).read_bytes())
+                (ckpt / "layers").mkdir(exist_ok=True)
+                for p in layers_dir.glob("layer_*.pt"):
+                    (ckpt / "layers" / p.name).write_bytes(p.read_bytes())
         except RuntimeError as e:
-            if "PytorchStreamReader" in str(e) or "file not found" in str(e):
-                latest = _latest_ckpt()
+            if "PytorchStreamReader" in str(e) or "file not found" in str(e).lower():
+                step_from_file = None
+                if step_file.exists():
+                    try:
+                        step_from_file = int(step_file.read_text().strip())
+                    except (ValueError, OSError):
+                        pass
+                latest = _latest_ckpt(max_step=step_from_file) if step_from_file is not None else _latest_ckpt()
                 if latest:
                     pbar.write(f"  Corrupted layer. Restoring from {latest.name}...")
                     step = _restore_from_ckpt(latest)
-                    step_file.write_text(str(step))
+                    _write_step(step)
                     pbar.n = step
                     pbar.write(f"  Restored to step {step}. Retrying.")
                 else:
@@ -346,7 +390,7 @@ def train_72b_disk_offload(
                         del layer
                         gc.collect()
                     step = 0
-                    step_file.write_text("0")
+                    _write_step(0)
                     pbar.write("  Re-initialized. Retrying from step 0.")
             else:
                 raise
