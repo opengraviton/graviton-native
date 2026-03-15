@@ -17,6 +17,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional
 
+import psutil
 import torch
 import torch.nn as nn
 from tqdm import tqdm
@@ -79,6 +80,17 @@ def train_disk_offload(
     config = _get_disk_offload_config(model_size)
     if ram_cache_gb is not None and ram_cache_gb > 0:
         ram_cache_layers = min(config.num_hidden_layers, int(ram_cache_gb * 1024 / _LAYER_MB))
+    # Cap RAM cache to avoid OOM: leave 8 GB for activations, PyTorch, system
+    if ram_cache_layers > 0:
+        try:
+            avail_gb = psutil.virtual_memory().available / (1024**3)
+            max_cache_gb = max(2.0, avail_gb - 8.0)
+            max_layers = int(max_cache_gb * 1024 / _LAYER_MB)
+            if ram_cache_layers > max_layers:
+                ram_cache_layers = max(0, max_layers)
+                print(f"  RAM cache capped to {ram_cache_layers} layers (~{ram_cache_layers * _LAYER_MB / 1024:.1f} GB) — {avail_gb:.1f} GB available")
+        except Exception:
+            pass
     n_params = 36e9 if model_size == "36b" else 72e9
     offload_dir = Path(offload_dir or output_dir) / f"offload_{model_size}"
     out_path = Path(output_dir)

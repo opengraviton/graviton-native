@@ -28,6 +28,7 @@ dependencies = [
     "datasets>=2.14",
     "accelerate>=0.24",
     "graviton-ai",
+    "psutil>=5.9.0",
 ]
 
 [project.optional-dependencies]
