@@ -1,9 +1,9 @@
 """
 Graviton Omega — Ultra-sparse MoE + BitNet.
 
-Hedef: 100B+ efektif kapasite, 8GB RAM'de.
-- k=1 routing: Her token sadece 1 expert kullanır
-- BitNet ternary: 8x bellek tasarrufu
+Target: 100B+ effective capacity on 8GB RAM.
+- k=1 routing: Each token uses only 1 expert
+- BitNet ternary: 8x memory savings
 - 8 expert × 100M = 800M total, 100M active (Omega-Micro)
 
 Ref: docs/OMEGA_ARCHITECTURE.md
@@ -33,14 +33,14 @@ class OmegaConfig:
     vocab_size: int = 32000
     rms_norm_eps: float = 1e-5
     rope_theta: float = 10000.0
-    # Omega: k=1, çok expert
+    # Omega: k=1, many experts
     num_experts: int = 8
-    top_k: int = 1  # Sadece 1 expert — ultra sparse
-    expert_intermediate_ratio: int = 4  # Expert küçük
+    top_k: int = 1  # Only 1 expert — ultra sparse
+    expert_intermediate_ratio: int = 4  # Expert small
 
 
 class Top1Router(nn.Module):
-    """k=1 router — her token 1 expert."""
+    """k=1 router — each token uses 1 expert."""
 
     def __init__(self, hidden_size: int, num_experts: int):
         super().__init__()
@@ -69,7 +69,7 @@ class OmegaExpert(nn.Module):
 
 
 class OmegaMoELayer(nn.Module):
-    """k=1 MoE — sadece seçilen expert çalışır."""
+    """k=1 MoE — only the selected expert runs."""
 
     def __init__(self, config: OmegaConfig):
         super().__init__()
@@ -166,7 +166,7 @@ class OmegaCausalLM(nn.Module):
     Omega: Ultra-sparse MoE + BitNet.
 
     Omega-Micro: 8 expert × ~100M = 800M total, 100M active
-    Bellek: ~20 MB active (1.58-bit)
+    Memory: ~20 MB active (1.58-bit)
     """
 
     def __init__(self, config: OmegaConfig):

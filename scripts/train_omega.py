@@ -3,7 +3,7 @@
 Train Omega — Ultra-sparse MoE + BitNet.
 
 Omega-Micro: 8 expert, k=1, ~800M total, ~100M active.
-8GB RAM'de çalışır.
+Runs on 8GB RAM.
 
 Usage:
     python scripts/train_omega.py --model_size micro --steps 100

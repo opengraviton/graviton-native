@@ -1,92 +1,92 @@
-# Graviton Omega — İmkansızı Başarmak
+# Graviton Omega — Achieving the Impossible
 
-**Hedef:** Opus seviyesi (~100B efektif) modeli 8GB RAM'de çalıştırmak.
+**Goal:** Run an Opus-level (~100B effective) model on 8GB RAM.
 
-## 1. Temel Fikir
+## 1. Core Idea
 
-Mevcut LLM'ler **dense**: Her token için tüm parametreler kullanılır. 70B model = 70B × 16 bit = 140 GB.
+Current LLMs are **dense**: every token uses all parameters. 70B model = 70B × 16 bit = 140 GB.
 
-**Omega fikri:** Parametreleri o kadar seyrelt ki, her token sadece %1'ini kullansın.
+**Omega idea:** Sparsify parameters so each token uses only ~1%.
 
 ```
 100B total × 1.58-bit × 1% active = 200 MB RAM
 ```
 
-## 2. Mimari Bileşenleri
+## 2. Architecture Components
 
 ### 2.1 Ultra-Sparse MoE (k=1)
 
-| Klasik MoE | Omega MoE |
-|-----------|-----------|
+| Classic MoE | Omega MoE |
+|-------------|-----------|
 | 8 expert, k=2 → 25% active | 64 expert, k=1 → 1.56% active |
 | 70B total, 17B active | 100B total, 1.56B active |
 
-**Formül:** 64 expert × 1.56B = 100B total. Her token 1 expert'e gider.
+**Formula:** 64 expert × 1.56B = 100B total. Each token goes to 1 expert.
 
 ### 2.2 BitNet 1.58-bit
 
-- Ağırlıklar: {-1, 0, +1}
+- Weights: {-1, 0, +1}
 - 1.56B active × 1.58/8 = **308 MB** per layer
 
 ### 2.3 Layer Streaming
 
-- 80 layer, her biri 64 expert
-- Sadece **seçilen expert** yüklenir
+- 80 layers, each with 64 experts
+- Only the **selected expert** is loaded
 - Peak RAM: 1 layer × 1 expert = 308 MB
 
-### 2.4 Activation Cache Minimizasyonu
+### 2.4 Activation Cache Minimization
 
-- **Mamba/SSM** hybrid: O(n) context, KV cache yok
-- Veya: **Sparse attention** — sadece 256 token context
+- **Mamba/SSM** hybrid: O(n) context, no KV cache
+- Or: **Sparse attention** — only 256 token context
 
 ### 2.5 Hierarchical Routing
 
 ```
 Token → Router(1) → 1 expert (1.56B)
-     → Router(2) → "zor mu?" → Evet: retrieve from memory
-     → Hayır: expert devam
+     → Router(2) → "hard?" → Yes: retrieve from memory
+     → No: expert continues
 ```
 
-## 3. Bellek Bütçesi (8GB)
+## 3. Memory Budget (8GB)
 
-| Bileşen | MB |
-|---------|-----|
+| Component | MB |
+|-----------|-----|
 | 1 expert (1.56B @ 1.58-bit) | 308 |
 | Embedding + LM head | 100 |
 | Router (64 expert logits) | 1 |
 | Activations (batch=1, seq=512) | 8 |
 | KV cache (sparse, 256 pos) | 32 |
 | Python/PyTorch overhead | 500 |
-| **Toplam** | ~1 GB |
+| **Total** | ~1 GB |
 
-**Kalan 7 GB:** Prefetch, disk buffer, sistem.
+**Remaining 7 GB:** Prefetch, disk buffer, system.
 
-## 4. Disk I/O Optimizasyonu
+## 4. Disk I/O Optimization
 
-**Sorun:** 80 layer × 308 MB = 24 GB read/token. Çok yavaş.
+**Problem:** 80 layers × 308 MB = 24 GB read/token. Too slow.
 
-**Çözümler:**
-1. **Expert locality:** Benzer tokenlar aynı expert → cache hit
-2. **Layer prefetch:** Layer i compute edilirken layer i+1 expert yükle
-3. **NVMe:** 3 GB/s sequential → 24 GB / 3 = 8 saniye/token (hala yavaş)
-4. **RAM cache:** 8GB'ın 6GB'ı expert cache → 20 expert resident = 6 GB
+**Solutions:**
+1. **Expert locality:** Similar tokens use same expert → cache hit
+2. **Layer prefetch:** Load layer i+1 expert while computing layer i
+3. **NVMe:** 3 GB/s sequential → 24 GB / 3 = 8 sec/token (still slow)
+4. **RAM cache:** 6 GB of 8 GB for expert cache → 20 experts resident = 6 GB
 
-**20 expert cache:** En sık kullanılan 20 expert RAM'de. %80 cache hit = 5 token/s.
+**20 expert cache:** Most frequently used 20 experts in RAM. 80% cache hit = 5 tok/s.
 
-## 5. Eğitim Stratejisi
+## 5. Training Strategy
 
-- **Aşama 1:** Dense 1.56B BitNet eğit (baseline)
-- **Aşama 2:** 64 kopya, MoE router eğit (expert specialization)
-- **Aşama 3:** 100B total, distillation from Opus
+- **Stage 1:** Train dense 1.56B BitNet (baseline)
+- **Stage 2:** 64 copies, train MoE router (expert specialization)
+- **Stage 3:** 100B total, distillation from Opus
 
-## 6. Beklenen Kalite
+## 6. Expected Quality
 
-- 100B total, 1.56B active → **"64 farklı 1.56B uzman"**
-- Her uzman bir domain'de iyi (kod, math, genel, vb.)
-- Router doğru uzmanı seçerse → 1.56B'den çok daha iyi
-- **Risk:** Router hata yaparsa kalite düşer
+- 100B total, 1.56B active → **"64 different 1.56B experts"**
+- Each expert excels in one domain (code, math, general, etc.)
+- If router selects the right expert → much better than 1.56B alone
+- **Risk:** Quality drops if router makes mistakes
 
-## 7. Prototip Yolu
+## 7. Prototype Path
 
 1. **Omega-Micro:** 8 expert × 100M = 800M total, 100M active
 2. **Omega-Small:** 16 expert × 500M = 8B total, 500M active  
@@ -94,4 +94,4 @@ Token → Router(1) → 1 expert (1.56B)
 
 ---
 
-*"İmkansızı başarmak için önce mimariyi değiştirmek gerekir."*
+*"To achieve the impossible, first change the architecture."*
