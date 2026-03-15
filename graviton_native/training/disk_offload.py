@@ -70,12 +70,14 @@ def train_disk_offload(
     use_compile: bool = True,
     ram_cache_layers: int = 0,
     ram_cache_gb: Optional[float] = None,
+    keep_last_n_checkpoints: int = 1,
 ):
     """
     Train BitNet with disk offload. 72b (80 layers) or 36b (40 layers, ~2x faster).
     Peak RAM: ~15 GB (ram_cache=0). Disk: ~250 GB (36b) or ~500 GB (72b).
     ram_cache_layers: 0=minimal RAM. 20=cache 20 layers (~6 GB). 80=all layers (~25 GB).
     ram_cache_gb: Alternative — max GB for layer cache. Auto-computes layers (e.g. 25 → all 80 for 72b).
+    keep_last_n_checkpoints: Prune old checkpoints, keep only last N (default 1). Saves disk space.
     """
     config = _get_disk_offload_config(model_size)
     if ram_cache_gb is not None and ram_cache_gb > 0:
@@ -118,6 +120,20 @@ def train_disk_offload(
             valid = [p for p in ckpts if int(p.name.split("step")[1] if "step" in p.name else 0) <= max_step]
             return valid[-1] if valid else None
         return ckpts[-1]
+
+    def _prune_old_checkpoints(keep_n: int = 1):
+        """Remove old checkpoints before saving new one — keep only last keep_n."""
+        import shutil
+        ckpts = sorted(
+            out_path.glob(f"bitnet-{model_size}-step*"),
+            key=lambda p: int(p.name.split("step")[1]) if "step" in p.name else 0,
+        )
+        to_remove = len(ckpts) - keep_n + 1
+        for old in ckpts[: max(0, to_remove)]:
+            try:
+                shutil.rmtree(old)
+            except OSError:
+                pass
 
     if resume:
         if step_file.exists():
@@ -469,6 +485,7 @@ def train_disk_offload(
             if step % 1 == 0:
                 pbar.write(f"  step {step}/{steps} loss={loss_val:.4f}")
             if step % save_every == 0:
+                _prune_old_checkpoints(keep_last_n_checkpoints)
                 ckpt = out_path / f"bitnet-{model_size}-step{step}"
                 ckpt.mkdir(parents=True, exist_ok=True)
                 for f in ["embed.pt", "norm.pt", "lm_head.pt", "inv_freq.pt", "config.json"]:
@@ -478,8 +495,9 @@ def train_disk_offload(
                 for p in layers_dir.glob("layer_*.pt"):
                     (ckpt / "layers" / p.name).write_bytes(p.read_bytes())
                 pbar.write(f"  Saved {ckpt}")
-            # Light checkpoint every 10 steps for disk offload (more restore points)
+            # Light checkpoint every 10 steps — prune before save to avoid disk full
             elif step % 10 == 0:
+                _prune_old_checkpoints(keep_last_n_checkpoints)
                 ckpt = out_path / f"bitnet-{model_size}-step{step}"
                 ckpt.mkdir(parents=True, exist_ok=True)
                 for f in ["embed.pt", "norm.pt", "lm_head.pt", "inv_freq.pt", "config.json"]:

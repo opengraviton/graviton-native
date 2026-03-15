@@ -53,6 +53,7 @@ def cmd_run(args):
     disk_offload = getattr(args, "disk_offload", False)
     ram_cache = getattr(args, "ram_cache", 0)
     ram_cache_gb = getattr(args, "ram_cache_gb", None)
+    keep_checkpoints = getattr(args, "keep_checkpoints", 1)
     if num_gpu_cores is not None and num_gpu_cores > 0:
         if not _is_mac_mps():
             print("  ⚠️  --num_gpu_cores given but MPS not available. Using CPU.")
@@ -70,6 +71,7 @@ def cmd_run(args):
                 resume=resume,
                 ram_cache_layers=ram_cache,
                 ram_cache_gb=ram_cache_gb,
+                keep_last_n_checkpoints=keep_checkpoints,
             )
             return 0
         if model_size in ("36b", "72b"):
@@ -163,6 +165,8 @@ def main():
         help="Disk-offload: cache N layers in RAM (0=minimal, 80=all for 72b). ~25 GB for 80 layers.")
     p_run.add_argument("--ram_cache_gb", type=float, default=None,
         help="Disk-offload: max GB for layer cache. Auto-computes layers (e.g. 25 = all 80 for 72b). Overrides --ram_cache.")
+    p_run.add_argument("--keep_checkpoints", type=int, default=1,
+        help="Disk-offload: keep only last N checkpoints (default 1). Prunes old ones to save disk.")
     p_run.set_defaults(func=cmd_run)
 
     args = parser.parse_args()
