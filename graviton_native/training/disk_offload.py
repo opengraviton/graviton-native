@@ -50,6 +50,10 @@ def _get_disk_offload_config(model_size: str) -> BitNetConfig:
     return base
 
 
+# Approx MB per layer (BitNet 1.58-bit): 72b/80 ≈ 0.9B params → ~180 MB
+_LAYER_MB = 300  # conservative estimate for 72b layer
+
+
 def train_disk_offload(
     model_size: str = "72b",
     output_dir: str = "./checkpoints",
@@ -63,12 +67,18 @@ def train_disk_offload(
     dataset_name: str = "smangrul/hug_stack",
     resume: bool = True,
     use_compile: bool = True,
+    ram_cache_layers: int = 0,
+    ram_cache_gb: Optional[float] = None,
 ):
     """
     Train BitNet with disk offload. 72b (80 layers) or 36b (40 layers, ~2x faster).
-    Peak RAM: ~15 GB. Disk: ~250 GB (36b) or ~500 GB (72b).
+    Peak RAM: ~15 GB (ram_cache=0). Disk: ~250 GB (36b) or ~500 GB (72b).
+    ram_cache_layers: 0=minimal RAM. 20=cache 20 layers (~6 GB). 80=all layers (~25 GB).
+    ram_cache_gb: Alternative — max GB for layer cache. Auto-computes layers (e.g. 25 → all 80 for 72b).
     """
     config = _get_disk_offload_config(model_size)
+    if ram_cache_gb is not None and ram_cache_gb > 0:
+        ram_cache_layers = min(config.num_hidden_layers, int(ram_cache_gb * 1024 / _LAYER_MB))
     n_params = 36e9 if model_size == "36b" else 72e9
     offload_dir = Path(offload_dir or output_dir) / f"offload_{model_size}"
     out_path = Path(output_dir)
@@ -266,12 +276,27 @@ def train_disk_offload(
 
     # Prefetch executor: overlap disk I/O with compute
     _exec = ThreadPoolExecutor(max_workers=2)
+    cache_size = min(ram_cache_layers, config.num_hidden_layers) if ram_cache_layers > 0 else 0
+    if cache_size > 0:
+        cache_gb = cache_size * _LAYER_MB / 1024
+        print(f"  RAM cache: {cache_size} layers (~{cache_gb:.1f} GB) — less disk I/O")
 
     def _load_layer(i: int):
         return torch.load(layers_dir / f"layer_{i:03d}.pt", map_location="cpu", weights_only=True)
 
     def _save_layer(state_dict, i: int):
         torch.save(state_dict, layers_dir / f"layer_{i:03d}.pt")
+
+    # torch.compile wraps module; saved state_dict has original keys — load/save via _orig_mod
+    def _layer_for_io(module):
+        return getattr(module, "_orig_mod", module)
+
+    def _load_chunk(start: int, end: int) -> dict:
+        """Load layers [start, end) into a dict. Uses parallel loads when cache_size > 1."""
+        if end - start <= 1:
+            return {start: _load_layer(start)} if start < config.num_hidden_layers else {}
+        futures = [_exec.submit(_load_layer, i) for i in range(start, min(end, config.num_hidden_layers))]
+        return {start + j: f.result() for j, f in enumerate(futures)}
 
     # Forward: activations kept in RAM (~1.3 GB), layer prefetching overlaps I/O with compute
     def forward(ids):
@@ -282,12 +307,27 @@ def train_disk_offload(
         del x
         gc.collect()
 
-        next_load = _exec.submit(_load_layer, 0)
+        if cache_size >= config.num_hidden_layers:
+            # Load all layers into RAM once — no disk during forward
+            layer_cache = _load_chunk(0, config.num_hidden_layers)
+        else:
+            layer_cache = {}
+
+        next_load = None if cache_size > 0 else _exec.submit(_load_layer, 0)
         for i in range(config.num_hidden_layers):
-            layer_sd = next_load.result()
-            if i + 1 < config.num_hidden_layers:
-                next_load = _exec.submit(_load_layer, i + 1)
-            layer_module.load_state_dict(layer_sd)
+            if cache_size >= config.num_hidden_layers:
+                layer_sd = layer_cache[i]
+            elif cache_size > 0:
+                chunk_start = (i // cache_size) * cache_size
+                if i == chunk_start:
+                    layer_cache.clear()
+                    layer_cache.update(_load_chunk(chunk_start, chunk_start + cache_size))
+                layer_sd = layer_cache[i]
+            else:
+                layer_sd = next_load.result()
+                if i + 1 < config.num_hidden_layers:
+                    next_load = _exec.submit(_load_layer, i + 1)
+            _layer_for_io(layer_module).load_state_dict(layer_sd)
             x = acts[-1].to(device)
             x = layer_module(x, position_embeddings=(cos, sin))
             acts.append(x.detach().cpu())
@@ -299,9 +339,9 @@ def train_disk_offload(
         lm_head.load_state_dict(torch.load(offload_dir / "lm_head.pt", map_location=device, weights_only=True))
         x = norm(x)
         logits = lm_head(x)
-        return logits, acts
+        return logits, acts, layer_cache if cache_size >= config.num_hidden_layers else None
 
-    def backward_and_optimizer(lr, acts, input_ids_cpu, targets_cpu):
+    def backward_and_optimizer(lr, acts, input_ids_cpu, targets_cpu, layer_cache: Optional[dict] = None):
         """Backward pass + SGD step. Activations from RAM. Prefetch + background save."""
         # Last: norm + lm_head
         act = acts[config.num_hidden_layers].to(device)
@@ -324,14 +364,24 @@ def train_disk_offload(
 
         # Layers 79 down to 0: prefetch next layer, save current in background
         save_future = None
-        next_load = _exec.submit(_load_layer, config.num_hidden_layers - 1)  # prefetch layer 79
+        next_load = None if (layer_cache is not None and len(layer_cache) >= config.num_hidden_layers) else _exec.submit(_load_layer, config.num_hidden_layers - 1)
+        backward_chunk = {}
         for idx, i in enumerate(range(config.num_hidden_layers - 1, -1, -1)):
             if save_future is not None:
                 save_future.result()
-            layer_sd = next_load.result()
-            if i > 0:
-                next_load = _exec.submit(_load_layer, i - 1)
-            layer_module.load_state_dict(layer_sd)
+            if layer_cache is not None and len(layer_cache) >= config.num_hidden_layers:
+                layer_sd = layer_cache[i]
+            elif cache_size > 0:
+                chunk_start = (i // cache_size) * cache_size
+                if i not in backward_chunk:
+                    backward_chunk.clear()
+                    backward_chunk.update(_load_chunk(chunk_start, min(chunk_start + cache_size, config.num_hidden_layers)))
+                layer_sd = backward_chunk[i]
+            else:
+                layer_sd = next_load.result()
+                if i > 0:
+                    next_load = _exec.submit(_load_layer, i - 1)
+            _layer_for_io(layer_module).load_state_dict(layer_sd)
             act = acts[i].to(device)
             act.requires_grad_(True)
             cos, sin = get_rope(torch.arange(act.size(1), device=device).unsqueeze(0))
@@ -341,12 +391,19 @@ def train_disk_offload(
             for p, g in zip(layer_module.parameters(), grads[1:]):
                 if g is not None:
                     p.data.sub_(g, alpha=lr)
-            save_future = _exec.submit(_save_layer, layer_module.state_dict(), i)
+            updated_sd = _layer_for_io(layer_module).state_dict()
+            if layer_cache is not None and len(layer_cache) >= config.num_hidden_layers:
+                layer_cache[i] = updated_sd
+            else:
+                save_future = _exec.submit(_save_layer, updated_sd, i)
             del act, out, grads, layer_sd
             gc.collect()
 
         if save_future is not None:
             save_future.result()
+        if layer_cache is not None and len(layer_cache) >= config.num_hidden_layers:
+            for i, sd in layer_cache.items():
+                _save_layer(sd, i)
 
         # Embed
         embed.load_state_dict(torch.load(offload_dir / "embed.pt", map_location=device, weights_only=True))
@@ -379,7 +436,7 @@ def train_disk_offload(
             torch.save(targets_cpu, acts_dir / "targets.pt")  # for resume/corruption recovery
             torch.save(input_ids_cpu, acts_dir / "input_ids.pt")
 
-            logits, acts = forward(ids)
+            logits, acts, layer_cache = forward(ids)
             loss = torch.nn.functional.cross_entropy(
                 logits[:, :-1].reshape(-1, config.vocab_size),
                 ids[:, 1:].reshape(-1),
@@ -389,7 +446,7 @@ def train_disk_offload(
             del logits
             gc.collect()
 
-            backward_and_optimizer(lr, acts, input_ids_cpu, targets_cpu)
+            backward_and_optimizer(lr, acts, input_ids_cpu, targets_cpu, layer_cache)
             del loss
             gc.collect()
 

@@ -51,6 +51,8 @@ def cmd_run(args):
 
     # Mac: num_gpu_cores → MPS (or disk-offload for 72b)
     disk_offload = getattr(args, "disk_offload", False)
+    ram_cache = getattr(args, "ram_cache", 0)
+    ram_cache_gb = getattr(args, "ram_cache_gb", None)
     if num_gpu_cores is not None and num_gpu_cores > 0:
         if not _is_mac_mps():
             print("  ⚠️  --num_gpu_cores given but MPS not available. Using CPU.")
@@ -66,6 +68,8 @@ def cmd_run(args):
                 seq_len=min(seq_len, 256),
                 save_every=save_every,
                 resume=resume,
+                ram_cache_layers=ram_cache,
+                ram_cache_gb=ram_cache_gb,
             )
             return 0
         if model_size in ("36b", "72b"):
@@ -155,6 +159,10 @@ def main():
         help="HuggingFace token for gated datasets (the-stack). Or set HF_TOKEN env.")
     p_run.add_argument("--disk_offload", action="store_true",
         help="36b/72b on Mac: disk-offload (~15 GB RAM, 36b=~2x faster)")
+    p_run.add_argument("--ram_cache", type=int, default=0,
+        help="Disk-offload: cache N layers in RAM (0=minimal, 80=all for 72b). ~25 GB for 80 layers.")
+    p_run.add_argument("--ram_cache_gb", type=float, default=None,
+        help="Disk-offload: max GB for layer cache. Auto-computes layers (e.g. 25 = all 80 for 72b). Overrides --ram_cache.")
     p_run.set_defaults(func=cmd_run)
 
     args = parser.parse_args()
