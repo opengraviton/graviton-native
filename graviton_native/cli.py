@@ -54,10 +54,12 @@ def cmd_run(args):
     if num_gpu_cores is not None and num_gpu_cores > 0:
         if not _is_mac_mps():
             print("  ⚠️  --num_gpu_cores given but MPS not available. Using CPU.")
-        if model_size == "72b" and disk_offload:
-            from graviton_native.training.disk_offload import train_72b_disk_offload
-            print("\n  72B disk-offload mode — ~15 GB RAM, ~500 GB disk, very slow.\n")
-            train_72b_disk_offload(
+        if model_size in ("36b", "72b") and disk_offload:
+            from graviton_native.training.disk_offload import train_disk_offload
+            disk_gb = 250 if model_size == "36b" else 500
+            print(f"\n  {model_size.upper()} disk-offload — ~15 GB RAM, ~{disk_gb} GB disk.\n")
+            train_disk_offload(
+                model_size=model_size,
                 output_dir=output_dir,
                 steps=steps,
                 batch_size=batch_size,
@@ -66,8 +68,8 @@ def cmd_run(args):
                 resume=resume,
             )
             return 0
-        if model_size == "72b":
-            print("  ⚠️  72B does not fit on Mac. Use --disk_offload for 72B, or 7b (max with grad checkpoint).")
+        if model_size in ("36b", "72b"):
+            print(f"  ⚠️  {model_size.upper()} does not fit on Mac. Use --disk_offload for {model_size.upper()}, or 7b (max with grad checkpoint).")
             model_size = "7b"
         if dataset == "the-stack":
             print("  ⚠️  the-stack is gated. Use --dataset hug-stack, or request access at https://huggingface.co/datasets/bigcode/the-stack")
@@ -138,8 +140,8 @@ def main():
         help="Mac: GPU cores (e.g. 32). Uses MPS.")
     p_run.add_argument("--num_gpus", type=int, default=None,
         help="NVIDIA: GPU count (e.g. 8). Uses DeepSpeed.")
-    p_run.add_argument("--model_size", default="1b", choices=["350m", "1b", "2b", "7b", "72b"],
-        help="Model size (7b max on Mac with grad checkpoint, 72b NVIDIA only)")
+    p_run.add_argument("--model_size", default="1b", choices=["350m", "1b", "2b", "7b", "36b", "72b"],
+        help="Model size (7b max on Mac, 36b/72b disk-offload on Mac)")
     p_run.add_argument("--dataset", default="hug-stack", choices=["hug-stack", "the-stack"],
         help="Dataset (hug-stack=open, the-stack=gated, needs HF access)")
     p_run.add_argument("--steps", type=int, default=5000)
@@ -152,7 +154,7 @@ def main():
     p_run.add_argument("--hf_token", type=str, default=None,
         help="HuggingFace token for gated datasets (the-stack). Or set HF_TOKEN env.")
     p_run.add_argument("--disk_offload", action="store_true",
-        help="72B on Mac: disk-offload mode (~15 GB RAM, ~500 GB disk, very slow)")
+        help="36b/72b on Mac: disk-offload (~15 GB RAM, 36b=~2x faster)")
     p_run.set_defaults(func=cmd_run)
 
     args = parser.parse_args()

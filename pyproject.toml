@@ -36,6 +36,13 @@ train = [
     "deepspeed>=0.12",
     "bitsandbytes>=0.41",
 ]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+]
+mlx = [
+    "mlx>=0.19",
+]
 
 [project.scripts]
 graviton-train = "graviton_native.cli:main"
@@ -43,3 +50,8 @@ graviton-train = "graviton_native.cli:main"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["graviton_native*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-v --tb=short"

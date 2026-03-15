@@ -86,6 +86,14 @@ graviton-ui
 python scripts/train_moe.py --model_size small --steps 100
 ```
 
+### Omega — Ultra-sparse (8GB hedef)
+
+```bash
+python scripts/train_omega.py --model_size micro --steps 100
+```
+
+Omega: k=1 MoE + BitNet. 80M total, ~10M active/token, ~2 MB RAM aktif.
+
 ## Requirements
 
 - Python 3.9+

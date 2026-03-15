@@ -2,7 +2,10 @@
 Disk-Offload Training — 72B on 64 GB Mac
 
 Params, gradients, optimizer states stored on disk. Load one layer at a time.
-~15 GB peak RAM. Requires ~500 GB free disk. SLOW but works.
+~15 GB peak RAM. Requires ~500 GB free disk. Optimized with:
+  - Activations in RAM (~1.3 GB) — no disk I/O for 80 layer activations
+  - Layer prefetching — overlap disk load with compute
+  - Background layer save — overlap disk write with next layer load
 """
 
 from __future__ import annotations
@@ -10,6 +13,7 @@ from __future__ import annotations
 import gc
 import json
 import os
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional
 
@@ -20,7 +24,34 @@ from tqdm import tqdm
 from graviton_native.models.bitnet import BitNetBlock, BitNetConfig, BitNetCausalLM
 
 
-def train_72b_disk_offload(
+def _get_disk_offload_config(model_size: str) -> BitNetConfig:
+    """Config for disk-offload: 72b (80 layers) or 36b (40 layers, ~2x faster)."""
+    base = BitNetConfig(
+        hidden_size=8192,
+        intermediate_size=28672,
+        num_hidden_layers=80,
+        num_attention_heads=64,
+        num_key_value_heads=8,
+        vocab_size=32016,
+        max_position_embeddings=16384,
+        rope_theta=1000000.0,
+    )
+    if model_size == "36b":
+        return BitNetConfig(
+            hidden_size=base.hidden_size,
+            intermediate_size=base.intermediate_size,
+            num_hidden_layers=40,
+            num_attention_heads=base.num_attention_heads,
+            num_key_value_heads=base.num_key_value_heads,
+            vocab_size=base.vocab_size,
+            max_position_embeddings=base.max_position_embeddings,
+            rope_theta=base.rope_theta,
+        )
+    return base
+
+
+def train_disk_offload(
+    model_size: str = "72b",
     output_dir: str = "./checkpoints",
     offload_dir: Optional[str] = None,
     steps: int = 100,
@@ -31,12 +62,15 @@ def train_72b_disk_offload(
     data_path: Optional[str] = None,
     dataset_name: str = "smangrul/hug_stack",
     resume: bool = True,
+    use_compile: bool = True,
 ):
     """
-    Train 72B BitNet with disk offload. One layer in RAM at a time.
-    Peak RAM: ~15 GB. Disk: ~500 GB. Very slow (~hours per step).
+    Train BitNet with disk offload. 72b (80 layers) or 36b (40 layers, ~2x faster).
+    Peak RAM: ~15 GB. Disk: ~250 GB (36b) or ~500 GB (72b).
     """
-    offload_dir = Path(offload_dir or output_dir) / "offload_72b"
+    config = _get_disk_offload_config(model_size)
+    n_params = 36e9 if model_size == "36b" else 72e9
+    offload_dir = Path(offload_dir or output_dir) / f"offload_{model_size}"
     out_path = Path(output_dir)
     offload_dir.mkdir(parents=True, exist_ok=True)
 
@@ -53,7 +87,7 @@ def train_72b_disk_offload(
 
     def _latest_ckpt(max_step: Optional[int] = None):
         ckpts = sorted(
-            out_path.glob("bitnet-72b-step*"),
+            out_path.glob(f"bitnet-{model_size}-step*"),
             key=lambda p: int(p.name.split("step")[1]) if "step" in p.name else 0,
         )
         if not ckpts:
@@ -91,28 +125,20 @@ def train_72b_disk_offload(
                 start_step = int(latest.name.split("step")[1])
                 print(f"  Resuming from step {start_step} (inferred from {latest.name})")
 
-    config = BitNetConfig(
-        hidden_size=8192,
-        intermediate_size=28672,
-        num_hidden_layers=80,
-        num_attention_heads=64,
-        num_key_value_heads=8,
-        vocab_size=32016,
-        max_position_embeddings=16384,
-        rope_theta=1000000.0,
-    )
-
     device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
-    n_params = 72e9
-    print(f"\n  72B BitNet — Disk Offload Training")
-    print(f"  Peak RAM: ~15 GB | Disk: ~500 GB | Device: {device}")
-    print(f"  WARNING: Very slow (~10-30 min/step). For speed use cloud.\n")
+    print(f"\n  {model_size.upper()} BitNet — Disk Offload Training")
+    disk_gb = 250 if model_size == "36b" else 500
+    print(f"  Peak RAM: ~15 GB | Disk: ~{disk_gb} GB | Device: {device}")
+    if model_size == "36b":
+        print(f"  36b = 40 layers (vs 72b/80) — ~2x faster per step.\n")
+    else:
+        print(f"  WARNING: Very slow (~10-30 min/step). Try --model_size 36b for ~2x speed.\n")
 
-    # Build model layer-by-layer to avoid OOM (72B = ~144 GB)
+    # Build model layer-by-layer to avoid OOM
     layers_dir = offload_dir / "layers"
     layers_dir.mkdir(exist_ok=True)
     if not (layers_dir / "layer_000.pt").exists():
-        print("  Initializing 72B model (layer by layer)...")
+        print(f"  Initializing {model_size.upper()} model (layer by layer)...")
         for i in range(config.num_hidden_layers):
             layer = BitNetBlock(config, i)
             torch.save(layer.state_dict(), layers_dir / f"layer_{i:03d}.pt")
@@ -216,6 +242,12 @@ def train_72b_disk_offload(
 
     # Recreate single layer for compute
     layer_module = BitNetBlock(config, 0).to(device)
+    if use_compile:
+        try:
+            layer_module = torch.compile(layer_module, mode="reduce-overhead")
+            print("  torch.compile: ON (faster compute)")
+        except Exception:
+            pass
     embed = nn.Embedding(config.vocab_size, config.hidden_size).to(device)
     norm = nn.RMSNorm(config.hidden_size, eps=config.rms_norm_eps).to(device)
     lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False).to(device)
@@ -232,40 +264,53 @@ def train_72b_disk_offload(
     acts_dir.mkdir(exist_ok=True)
     grads_dir.mkdir(exist_ok=True)
 
-    # Forward: layer by layer, save activations to disk
+    # Prefetch executor: overlap disk I/O with compute
+    _exec = ThreadPoolExecutor(max_workers=2)
+
+    def _load_layer(i: int):
+        return torch.load(layers_dir / f"layer_{i:03d}.pt", map_location="cpu", weights_only=True)
+
+    def _save_layer(state_dict, i: int):
+        torch.save(state_dict, layers_dir / f"layer_{i:03d}.pt")
+
+    # Forward: activations kept in RAM (~1.3 GB), layer prefetching overlaps I/O with compute
     def forward(ids):
-        embed.load_state_dict(torch.load(offload_dir / "embed.pt", map_location=device))
+        embed.load_state_dict(torch.load(offload_dir / "embed.pt", map_location=device, weights_only=True))
         x = embed(ids)
         cos, sin = get_rope(torch.arange(x.size(1), device=device).unsqueeze(0))
-        torch.save(x.detach().cpu(), acts_dir / "act_00.pt")
+        acts = [x.detach().cpu()]
         del x
         gc.collect()
 
+        next_load = _exec.submit(_load_layer, 0)
         for i in range(config.num_hidden_layers):
-            x = torch.load(acts_dir / f"act_{i:02d}.pt", map_location=device)
-            layer_module.load_state_dict(torch.load(layers_dir / f"layer_{i:03d}.pt", map_location=device))
+            layer_sd = next_load.result()
+            if i + 1 < config.num_hidden_layers:
+                next_load = _exec.submit(_load_layer, i + 1)
+            layer_module.load_state_dict(layer_sd)
+            x = acts[-1].to(device)
             x = layer_module(x, position_embeddings=(cos, sin))
-            torch.save(x.detach().cpu(), acts_dir / f"act_{i+1:02d}.pt")
-            del x
+            acts.append(x.detach().cpu())
+            del x, layer_sd
             gc.collect()
 
-        x = torch.load(acts_dir / f"act_{config.num_hidden_layers:02d}.pt", map_location=device)
-        norm.load_state_dict(torch.load(offload_dir / "norm.pt", map_location=device))
-        lm_head.load_state_dict(torch.load(offload_dir / "lm_head.pt", map_location=device))
+        x = acts[-1].to(device)
+        norm.load_state_dict(torch.load(offload_dir / "norm.pt", map_location=device, weights_only=True))
+        lm_head.load_state_dict(torch.load(offload_dir / "lm_head.pt", map_location=device, weights_only=True))
         x = norm(x)
         logits = lm_head(x)
-        return logits
+        return logits, acts
 
-    def backward_and_optimizer(lr):
-        """Backward pass + SGD step, one layer at a time."""
+    def backward_and_optimizer(lr, acts, input_ids_cpu, targets_cpu):
+        """Backward pass + SGD step. Activations from RAM. Prefetch + background save."""
         # Last: norm + lm_head
-        act = torch.load(acts_dir / f"act_{config.num_hidden_layers:02d}.pt", map_location=device)
+        act = acts[config.num_hidden_layers].to(device)
         act.requires_grad_(True)
-        norm.load_state_dict(torch.load(offload_dir / "norm.pt", map_location=device))
-        lm_head.load_state_dict(torch.load(offload_dir / "lm_head.pt", map_location=device))
+        norm.load_state_dict(torch.load(offload_dir / "norm.pt", map_location=device, weights_only=True))
+        lm_head.load_state_dict(torch.load(offload_dir / "lm_head.pt", map_location=device, weights_only=True))
         x = norm(act)
         logits = lm_head(x)
-        targets = torch.load(acts_dir / "targets.pt", map_location=device)
+        targets = targets_cpu.to(device)
         l = torch.nn.functional.cross_entropy(logits[:, :-1].reshape(-1, config.vocab_size), targets, ignore_index=0)
         grads = torch.autograd.grad(l, [act] + list(norm.parameters()) + list(lm_head.parameters()))
         grad_act = grads[0]
@@ -277,28 +322,35 @@ def train_72b_disk_offload(
         del act, x, logits, l, grads
         gc.collect()
 
-        # Layers 79 down to 0
-        for i in range(config.num_hidden_layers - 1, -1, -1):
-            act = torch.load(acts_dir / f"act_{i:02d}.pt", map_location=device)
+        # Layers 79 down to 0: prefetch next layer, save current in background
+        save_future = None
+        next_load = _exec.submit(_load_layer, config.num_hidden_layers - 1)  # prefetch layer 79
+        for idx, i in enumerate(range(config.num_hidden_layers - 1, -1, -1)):
+            if save_future is not None:
+                save_future.result()
+            layer_sd = next_load.result()
+            if i > 0:
+                next_load = _exec.submit(_load_layer, i - 1)
+            layer_module.load_state_dict(layer_sd)
+            act = acts[i].to(device)
             act.requires_grad_(True)
-            layer_module.load_state_dict(torch.load(layers_dir / f"layer_{i:03d}.pt", map_location=device))
             cos, sin = get_rope(torch.arange(act.size(1), device=device).unsqueeze(0))
             out = layer_module(act, position_embeddings=(cos, sin))
-            grad_out = grad_act
-            grads = torch.autograd.grad(out, [act] + list(layer_module.parameters()), grad_out)
+            grads = torch.autograd.grad(out, [act] + list(layer_module.parameters()), grad_act)
             grad_act = grads[0]
-            param_grads = grads[1:]
-            # SGD step
-            for p, g in zip(layer_module.parameters(), param_grads):
+            for p, g in zip(layer_module.parameters(), grads[1:]):
                 if g is not None:
                     p.data.sub_(g, alpha=lr)
-            torch.save(layer_module.state_dict(), layers_dir / f"layer_{i:03d}.pt")
-            del act, out, grads, param_grads
+            save_future = _exec.submit(_save_layer, layer_module.state_dict(), i)
+            del act, out, grads, layer_sd
             gc.collect()
 
+        if save_future is not None:
+            save_future.result()
+
         # Embed
-        embed.load_state_dict(torch.load(offload_dir / "embed.pt", map_location=device))
-        ids = torch.load(acts_dir / "input_ids.pt", map_location=device)
+        embed.load_state_dict(torch.load(offload_dir / "embed.pt", map_location=device, weights_only=True))
+        ids = input_ids_cpu.to(device)
         x = embed(ids)
         ge = torch.autograd.grad(x, list(embed.parameters()), grad_act)
         for p, g in zip(embed.parameters(), ge):
@@ -315,17 +367,19 @@ def train_72b_disk_offload(
         return str(offload_dir)
 
     step = start_step
-    pbar = tqdm(initial=step, total=steps, desc="72B disk-offload")
+    pbar = tqdm(initial=step, total=steps, desc=f"{model_size.upper()} disk-offload")
     while step < steps:
         try:
             # Persist step BEFORE heavy work so resume survives Ctrl+C mid-step
             _write_step(step)
 
             ids = get_batch()
-            torch.save(ids[:, 1:].reshape(-1).cpu(), acts_dir / "targets.pt")
-            torch.save(ids.cpu(), acts_dir / "input_ids.pt")
+            targets_cpu = ids[:, 1:].reshape(-1).cpu()
+            input_ids_cpu = ids.cpu()
+            torch.save(targets_cpu, acts_dir / "targets.pt")  # for resume/corruption recovery
+            torch.save(input_ids_cpu, acts_dir / "input_ids.pt")
 
-            logits = forward(ids)
+            logits, acts = forward(ids)
             loss = torch.nn.functional.cross_entropy(
                 logits[:, :-1].reshape(-1, config.vocab_size),
                 ids[:, 1:].reshape(-1),
@@ -335,7 +389,7 @@ def train_72b_disk_offload(
             del logits
             gc.collect()
 
-            backward_and_optimizer(lr)
+            backward_and_optimizer(lr, acts, input_ids_cpu, targets_cpu)
             del loss
             gc.collect()
 
@@ -346,7 +400,7 @@ def train_72b_disk_offload(
             if step % 1 == 0:
                 pbar.write(f"  step {step}/{steps} loss={loss_val:.4f}")
             if step % save_every == 0:
-                ckpt = out_path / f"bitnet-72b-step{step}"
+                ckpt = out_path / f"bitnet-{model_size}-step{step}"
                 ckpt.mkdir(parents=True, exist_ok=True)
                 for f in ["embed.pt", "norm.pt", "lm_head.pt", "inv_freq.pt", "config.json"]:
                     if (offload_dir / f).exists():
@@ -357,7 +411,7 @@ def train_72b_disk_offload(
                 pbar.write(f"  Saved {ckpt}")
             # Light checkpoint every 10 steps for disk offload (more restore points)
             elif step % 10 == 0:
-                ckpt = out_path / f"bitnet-72b-step{step}"
+                ckpt = out_path / f"bitnet-{model_size}-step{step}"
                 ckpt.mkdir(parents=True, exist_ok=True)
                 for f in ["embed.pt", "norm.pt", "lm_head.pt", "inv_freq.pt", "config.json"]:
                     if (offload_dir / f).exists():
@@ -397,3 +451,8 @@ def train_72b_disk_offload(
 
     print(f"\n  Done. Checkpoints in {output_dir}")
     return str(offload_dir)
+
+
+def train_72b_disk_offload(**kwargs):
+    """Backward compatibility: alias for train_disk_offload(model_size="72b")."""
+    return train_disk_offload(model_size="72b", **kwargs)
