@@ -220,10 +220,13 @@ def train_disk_offload(
             (layers_dir / p.name).write_bytes(p.read_bytes())
         return int(latest.name.split("step")[1])
 
-    # Verify layer 0 (quick sanity check)
+    # Verify all layers exist (incomplete init or corruption)
     def _verify_layers():
+        for i in range(config.num_hidden_layers):
+            if not (layers_dir / f"layer_{i:03d}.pt").exists():
+                return False
         try:
-            torch.load(layers_dir / "layer_000.pt", map_location="cpu")
+            torch.load(layers_dir / "layer_000.pt", map_location="cpu", weights_only=True)
             return True
         except Exception:
             return False
